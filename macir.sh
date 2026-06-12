@@ -504,13 +504,25 @@ phase2_disk() {
     log INFO "Full-disk scan skipped (DO_FULL_DISK_SCAN=0)"
   fi
 
-  log INFO "Mach-O hunt outside system paths..."
+  log INFO "Mach-O hunt (magic-header scan)..."
+  : > "$D/machos_outside_system.txt"
   /usr/bin/find "${SRC}/tmp" "${SRC}/private/tmp" "${SRC}/var/tmp" \
-    "${SRC}/Users" "${SRC}/opt" "${SRC}/usr/local" \
-    -xdev -type f ! -path '*/node_modules/*' ! -path '*/Library/Developer/*' \
-    ! -path '*/Caches/com.apple.*' 2>/dev/null \
-    -exec sh -c 'out=$(/usr/bin/file -b "$1" 2>/dev/null); case "$out" in Mach-O*) echo "$1|$out";; esac' _ {} \; \
-    > "$D/machos_outside_system.txt"
+    "${SRC}/Users" "${SRC}/opt" "${SRC}/usr/local" -xdev \
+    \( -path '*/Library/Caches' -o -path '*/node_modules' -o -path '*/.git' \
+      -o -path '*/Library/Developer' \) -prune -o \
+    -type f -size -${MACHO_MAX_SIZE} \
+    ! -name '*.app' ! -name '*.png' ! -name '*.jpg' ! -name '*.json' \
+    ! -name '*.plist' ! -name '*.txt' ! -name '*.log' -print0 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      # Read first 4 bytes; match Mach-O / fat magics.
+      magic=$(/usr/bin/head -c4 "$f" 2>/dev/null | /usr/bin/xxd -p 2>/dev/null)
+      case "$magic" in
+        feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca)
+          desc=$(/usr/bin/file -b "$f" 2>/dev/null)
+          case "$desc" in Mach-O*) print -r -- "$f|$desc" ;; esac
+          ;;
+      esac
+    done > "$D/machos_outside_system.txt"
 
   log INFO "Codesign verification of Mach-O hits..."
   {
