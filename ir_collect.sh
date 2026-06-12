@@ -7,21 +7,28 @@
 # Author:     Khodaparastan
 # Version:    3.0  (2026-06-12)  — configurable + CLI
 # Invocation: sudo -E ./ir_collect.sh [options]   (run --help for details)
+# Requires:   macOS base tools (tmutil, mount_apfs, log, sqlite3, codesign,
+#             spctl, otool, sfltool, profiles, powermetrics); zsh 5.8+.
 #
 # Config precedence:  built-in defaults < ir_collect.conf < environment < CLI
 # ============================================================================
 
-set -u
-setopt PIPE_FAIL EXTENDED_GLOB NULL_GLOB
-zmodload zsh/datetime
-zmodload zsh/zutil          # zparseopts
+# ----------------------------------------------------------------------------
+# SHELL OPTIONS  (placed first so every subsequent line runs under them)
+# ----------------------------------------------------------------------------
+set -u                              # abort on expansion of an unset variable
+setopt PIPE_FAIL                    # a pipeline's status is the last non-zero rc
+setopt EXTENDED_GLOB                # enable <->, (#...) and other glob operators
+setopt NULL_GLOB                    # unmatched globs expand to nothing, not error
+zmodload zsh/datetime               # provides $EPOCHSECONDS / $EPOCHREALTIME / strftime
+zmodload zsh/zutil                  # provides zparseopts
 
-SCRIPT_NAME="${0:t}"
+SCRIPT_NAME="${0:t}"                # :t -> tail (basename of invoked path)
 SCRIPT_VERSION="3.0"
 SCRIPT_START_EPOCH=$EPOCHSECONDS
 
 # ----------------------------------------------------------------------------
-# Usage / version
+# USAGE / VERSION
 # ----------------------------------------------------------------------------
 usage() {
   cat <<EOF
@@ -73,13 +80,15 @@ EOF
 version() { print -r -- "${SCRIPT_NAME} ${SCRIPT_VERSION}"; }
 
 # ----------------------------------------------------------------------------
-# Argument parsing  (CLI captured into o_* holders; applied AFTER conf/env)
+# ARGUMENT PARSING  (CLI captured into o_* holders; applied AFTER conf/env)
 # ----------------------------------------------------------------------------
 local o_help o_version o_dryrun
 local o_config o_base o_case o_user o_lookback o_ioc o_phases
 local o_window o_pamwin o_maxsample o_minfree o_color
 local o_nosnap o_nodiag o_nopm o_nofulldisk o_nolsof o_nobundle
 
+# -D delete parsed args, -E keep going past non-options, -F error on unknown flag.
+# ':=' forms take a value; bare '=' forms are boolean toggles.
 zparseopts -D -E -F -- \
   {h,-help}=o_help \
   {V,-version}=o_version \
@@ -108,9 +117,10 @@ zparseopts -D -E -F -- \
 (( $#o_version )) && { version; exit 0 }
 
 # ----------------------------------------------------------------------------
-# Configuration resolution
+# CONFIGURATION RESOLUTION
 # ----------------------------------------------------------------------------
 # 1) Locate conf (CLI -c > env IR_CONFIG > default under evidence base).
+#    o_base[-1] = last occurrence of the option, if supplied.
 _pre_base="${o_base[-1]:-${EVIDENCE_BASE:-/Volumes/IR}}"
 : ${IR_CONFIG:="${_pre_base}/ir_collect.conf"}
 (( $#o_config )) && IR_CONFIG="${o_config[-1]}"
@@ -147,32 +157,34 @@ _IR_CONFIG_LOADED=""
 : ${IOC_FILE:=""}
 
 # 3) CLI overrides (highest precedence).
-(( $#o_base ))      && EVIDENCE_BASE="${o_base[-1]}"
-(( $#o_case ))      && CASE_ID="${o_case[-1]}"
-(( $#o_user ))      && TARGET_USER="${o_user[-1]}"
-(( $#o_lookback ))  && LOG_LOOKBACK="${o_lookback[-1]}"
-(( $#o_ioc ))       && IOC_FILE="${o_ioc[-1]}"
-(( $#o_phases ))    && PHASES="${o_phases[-1]}"
-(( $#o_window ))    && CHANGE_WINDOW_DAYS="${o_window[-1]}"
-(( $#o_pamwin ))    && PAM_WINDOW_DAYS="${o_pamwin[-1]}"
-(( $#o_maxsample )) && MAX_SAMPLE_BYTES="${o_maxsample[-1]}"
-(( $#o_minfree ))   && MIN_FREE_GB="${o_minfree[-1]}"
-(( $#o_color ))     && FORCE_COLOR="${o_color[-1]}"
-(( $#o_nosnap ))    && DO_SNAPSHOT=0
-(( $#o_nodiag ))    && DO_DIAGNOSTICS_TAR=0
-(( $#o_nopm ))      && DO_POWERMETRICS=0
+(( $#o_base ))       && EVIDENCE_BASE="${o_base[-1]}"
+(( $#o_case ))       && CASE_ID="${o_case[-1]}"
+(( $#o_user ))       && TARGET_USER="${o_user[-1]}"
+(( $#o_lookback ))   && LOG_LOOKBACK="${o_lookback[-1]}"
+(( $#o_ioc ))        && IOC_FILE="${o_ioc[-1]}"
+(( $#o_phases ))     && PHASES="${o_phases[-1]}"
+(( $#o_window ))     && CHANGE_WINDOW_DAYS="${o_window[-1]}"
+(( $#o_pamwin ))     && PAM_WINDOW_DAYS="${o_pamwin[-1]}"
+(( $#o_maxsample ))  && MAX_SAMPLE_BYTES="${o_maxsample[-1]}"
+(( $#o_minfree ))    && MIN_FREE_GB="${o_minfree[-1]}"
+(( $#o_color ))      && FORCE_COLOR="${o_color[-1]}"
+(( $#o_nosnap ))     && DO_SNAPSHOT=0
+(( $#o_nodiag ))     && DO_DIAGNOSTICS_TAR=0
+(( $#o_nopm ))       && DO_POWERMETRICS=0
 (( $#o_nofulldisk )) && DO_FULL_DISK_SCAN=0
-(( $#o_nolsof ))    && DO_LSOF_ALL=0
-(( $#o_nobundle ))  && DO_BUNDLE=0
+(( $#o_nolsof ))     && DO_LSOF_ALL=0
+(( $#o_nobundle ))   && DO_BUNDLE=0
 
 # Numeric sanity (set -u safe).
+# ${(P)_v} = indirect expansion (value of the var whose name is in _v);
+# the <-> glob (EXTENDED_GLOB) matches a run of digits, i.e. an integer.
 for _v in MIN_FREE_GB MAX_SAMPLE_BYTES CHANGE_WINDOW_DAYS PAM_WINDOW_DAYS \
           HIDDEN_DIR_MAXDEPTH HISTORY_TAIL_LINES LOG_HEAD_LINES \
           VMMAP_HEAD_LINES FSEVENTS_FILE_LIMIT IOC_HIT_LIMIT; do
   [[ "${(P)_v}" == <-> ]] || { print -u2 "$SCRIPT_NAME: $_v must be an integer (got '${(P)_v}')"; exit 2 }
 done
 
-# Target home (after TARGET_USER resolved).
+# Target home (after TARGET_USER resolved); fall back to conventional path.
 TARGET_HOME="$(/usr/bin/dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [[ -z "$TARGET_HOME" || ! -d "$TARGET_HOME" ]] && TARGET_HOME="/Users/${TARGET_USER}"
 
@@ -184,6 +196,7 @@ SRC=""; SNAP_MNT="${OUT}/_snapshot_root"
 SCRIPT_START_ISO="$(TZ=UTC strftime '%Y-%m-%dT%H:%M:%SZ' $EPOCHSECONDS)"
 
 # IOC list (defaults unless conf predefined) + IOC_FILE append.
+# ${+IOC_STRINGS} is 1 if the var is already set (e.g. by sourced conf).
 (( ${+IOC_STRINGS} )) || IOC_STRINGS=(
   "faced31.com" "stratos37.com"
   "homebrewclubs.org" "homebrewfaq.org" "homebrewonline.org" "homebrewupdate.org"
@@ -198,6 +211,8 @@ SCRIPT_START_ISO="$(TZ=UTC strftime '%Y-%m-%dT%H:%M:%SZ' $EPOCHSECONDS)"
   "com.finder.helper" "homebrew/update" "api/metrics/run"
 )
 if [[ -n "$IOC_FILE" && -r "$IOC_FILE" ]]; then
+  # ${(f)...} splits the grep output on newlines into array elements;
+  # grep -vE drops comment (#) and blank lines.
   IOC_STRINGS+=( ${(f)"$(/usr/bin/grep -vE '^\s*(#|$)' "$IOC_FILE")"} )
 fi
 
@@ -231,12 +246,12 @@ fi
 )
 
 # ----------------------------------------------------------------------------
-# Colors (NO_COLOR + --color aware)
+# COLORS  (NO_COLOR + --color aware)
 # ----------------------------------------------------------------------------
 _use_color() {
-  [[ -n "${NO_COLOR:-}" ]] && return 1
+  [[ -n "${NO_COLOR:-}" ]] && return 1          # honor https://no-color.org convention
   case "$FORCE_COLOR" in
-    always) return 0 ;; never) return 1 ;; *) [[ -t 1 ]] ;;
+    always) return 0 ;; never) return 1 ;; *) [[ -t 1 ]] ;;   # auto: only if stdout is a TTY
   esac
 }
 if _use_color; then
@@ -247,10 +262,11 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# Helpers
+# HELPERS
 # ----------------------------------------------------------------------------
 ts() {
   local now=$EPOCHREALTIME
+  # Take the fractional part and right-pad/truncate to 3 digits for ms precision.
   local frac="${now#*.}"; frac="${(r:3::0:)frac}"
   TZ=UTC strftime "%Y-%m-%dT%H:%M:%S.${frac}Z" "${now%.*}"
 }
@@ -267,10 +283,11 @@ log() {
   esac
   printf "%s\n" "$msg" >> "$LOG_FILE" 2>/dev/null
 }
+# rp: rewrite an absolute path so reads go through the snapshot root when mounted.
 rp() { print -r -- "${SRC}$1"; }
 run() {
   local desc="$1"; shift; local out="$1"; shift
-  [[ "${1:-}" == "--" ]] && shift
+  [[ "${1:-}" == "--" ]] && shift               # optional separator before the command
   local cmd="$*"; log INFO "→ $desc"
   printf "\n### [%s] %s\n### cmd: %s\n" "$(ts)" "$desc" "$cmd" >> "$LOG_FILE"
   local rc=0
@@ -281,6 +298,7 @@ run() {
 }
 runv() {
   local desc="$1" out="$2"; shift 2; log INFO "→ $desc"
+  # ${(q)*} quote-escapes argv so the logged command is copy-paste safe.
   printf "\n### [%s] %s\n### argv: %s\n" "$(ts)" "$desc" "${(q)*}" >> "$LOG_FILE"
   local rc=0
   if [[ -n "$out" ]]; then mkdir -p "${out:h}"; "$@" > "$out" 2>> "$ERR_FILE" || rc=$?
@@ -292,6 +310,7 @@ safe_cp() {
   local src="$1" dst="$2"
   [[ -e "$src" || -L "$src" ]] || { log WARN "skip (missing): $src"; return 0; }
   mkdir -p "${dst:h}"
+  # -p preserve attrs, -P do not follow symlinks, -R recurse.
   if /bin/cp -pPR "$src" "$dst" 2>>"$ERR_FILE"; then log OK "copied: $src"
   else log WARN "cp failed: $src"; fi
 }
@@ -303,6 +322,7 @@ stat_meta() {
   /usr/bin/xattr -l "$f" 2>/dev/null | sed 's/^/  xattr: /'
   /usr/bin/shasum -a 256 "$f" 2>/dev/null | sed 's/^/  sha256: /'
 }
+# phase_enabled: substring test on the space-padded PHASES list.
 phase_enabled() { [[ " $PHASES " == *" $1 "* ]]; }
 
 print_plan() {
@@ -322,7 +342,7 @@ print_plan() {
 }
 
 # ----------------------------------------------------------------------------
-# Preflight
+# PREFLIGHT
 # ----------------------------------------------------------------------------
 preflight() {
   log PHASE "PREFLIGHT"
@@ -331,6 +351,7 @@ preflight() {
     log ERR "EVIDENCE_BASE not found: $EVIDENCE_BASE"
     log ERR "Mount external media and re-run with -o /Volumes/<name>"; exit 1
   fi
+  # Refuse to write evidence onto the same device as the boot volume.
   local base_dev root_dev
   base_dev=$(/bin/df "$EVIDENCE_BASE" | awk 'NR==2{print $1}')
   root_dev=$(/bin/df / | awk 'NR==2{print $1}')
@@ -342,7 +363,7 @@ preflight() {
   (( avail_gb < MIN_FREE_GB )) && log WARN "Less than ${MIN_FREE_GB}G free; collection may be incomplete"
 
   mkdir -p "$OUT" "$META" || { log ERR "Cannot create $OUT"; exit 1; }
-  : >| "$LOG_FILE"; : >| "$ERR_FILE"; : >| "$MANIFEST"
+  : >| "$LOG_FILE"; : >| "$ERR_FILE"; : >| "$MANIFEST"   # truncate (clobber) the meta files
 
   log INFO "Config source:  ${_IR_CONFIG_LOADED:+$IR_CONFIG }${_IR_CONFIG_LOADED:-built-in defaults}"
   log INFO "Case ID:        $CASE_ID"
@@ -386,9 +407,11 @@ phase0_freeze() {
 }
 mount_ro_snapshot() {
   local snap
+  # Take the newest snapshot name, then strip everything up to the trailing dot.
   snap=$(/usr/bin/tmutil listlocalsnapshots / 2>/dev/null | /usr/bin/tail -1 | /usr/bin/sed 's/.*\.//')
   if [[ -z "$snap" ]]; then log WARN "No snapshot — on-disk reads hit LIVE fs (atime altered)"; return 1; fi
   mkdir -p "$SNAP_MNT"
+  # Mount read-only + nobrowse so the snapshot is invisible in Finder and atime-safe.
   if /sbin/mount_apfs -o ro,nobrowse -s "com.apple.TimeMachine.${snap}.local" / "$SNAP_MNT" 2>>"$ERR_FILE"; then
     SRC="$SNAP_MNT"; log OK "Snapshot mounted read-only at $SNAP_MNT — reads atime-safe"
   else log WARN "mount_apfs failed — on-disk reads hit LIVE fs (atime altered)"; return 1; fi
@@ -425,6 +448,8 @@ phase1_volatile() {
   runv "System extensions"   "$D/systemextensions.txt" systemextensionsctl list
 
   log INFO "Enumerating suspect process details..."
+  # Match processes whose command path lives in a temp/shared/hidden location,
+  # excluding this collector itself.
   local suspect_pids
   suspect_pids=$(ps -Axwwo pid,command | awk '
     /\/tmp\/|\/private\/tmp\/|\/Users\/Shared\/|\/\.[a-z0-9]/ && $0 !~ /ir_collect/ {print $1}' | sort -u)
@@ -432,7 +457,7 @@ phase1_volatile() {
     {
       echo "=== Suspect PIDs ==="; echo "$suspect_pids"; echo
       local pid
-      for pid in ${(f)suspect_pids}; do
+      for pid in ${(f)suspect_pids}; do          # ${(f)...}: iterate one PID per line
         echo "=== PID $pid ==="
         ps -o pid,ppid,uid,user,start,etime,command -p "$pid" 2>/dev/null
         echo "--- lsof ---";          lsof -p "$pid" -nP 2>/dev/null
@@ -451,6 +476,7 @@ phase2_disk() {
   local D="$OUT/02_disk"; mkdir -p "$D/captured_samples"
 
   log INFO "Checking known-bad artifact paths..."
+  # Substitute the literal "HOME" placeholder in each array element with $TARGET_HOME.
   local known_paths=( "${(@)KNOWN_BAD_PATHS//HOME/$TARGET_HOME}" )
   {
     local p sp sz
@@ -467,6 +493,8 @@ phase2_disk() {
 
   if (( DO_FULL_DISK_SCAN )); then
     log INFO "Time-bracket search (mtime OR btime <=${CHANGE_WINDOW_DAYS}d, single pass)..."
+    # ${(@)PRUNE_DIRS/#/-path ${SRC}} prefixes each prune dir with "-path <SRC>",
+    # then ${(j: -o :)...} joins those into a single "-path A -o -path B ..." clause.
     /usr/bin/find "${SRC:-/}" -xdev \
       \( ${(j: -o :)${(@)PRUNE_DIRS/#/-path ${SRC}}} -o -path "$EVIDENCE_BASE" -o -path "$SNAP_MNT" \) -prune -o \
       -type f \( -mtime -${CHANGE_WINDOW_DAYS} -o -Btime -${CHANGE_WINDOW_DAYS} \) -print 2>/dev/null \
@@ -487,7 +515,7 @@ phase2_disk() {
   log INFO "Codesign verification of Mach-O hits..."
   {
     local f desc sz
-    while IFS='|' read -r f desc; do
+    while IFS='|' read -r f desc; do            # split the "path|type" records
       [[ -z "$f" ]] && continue
       echo "================================================================"
       echo "FILE: ${f#$SRC}"; echo "TYPE: $desc"; stat_meta "$f"
@@ -495,6 +523,7 @@ phase2_disk() {
       echo "--- spctl ---";          /usr/sbin/spctl -a -vv "$f" 2>&1
       echo "--- otool -L ---";       /usr/bin/otool -L "$f" 2>/dev/null | head -20; echo
       sz=$(/usr/bin/stat -f '%z' "$f" 2>/dev/null); sz=${sz:-0}
+      # ${${f#$SRC}#/}: strip the snapshot prefix, then the leading slash.
       (( sz < MAX_SAMPLE_BYTES )) && safe_cp "$f" "$D/captured_samples/${${f#$SRC}#/}"
     done < "$D/machos_outside_system.txt"
   } > "$D/machos_verified.txt"
@@ -520,6 +549,7 @@ phase2_disk() {
     local f ft
     /usr/bin/find "${SRC}/tmp" "${SRC}/private/tmp" "$(rp "$TARGET_HOME/Downloads")" \
       -xdev -type f -mtime -${CHANGE_WINDOW_DAYS} 2>/dev/null | while read -r f; do
+        # Skip files that DO carry the quarantine xattr (those are expected).
         /usr/bin/xattr -lp com.apple.quarantine "$f" >/dev/null 2>&1 && continue
         ft=$(/usr/bin/file -b "$f" 2>/dev/null)
         case "$ft" in Mach-O*|*executable*|*script*) echo "MISSING_QUARANTINE: ${f#$SRC}  [$ft]";; esac
@@ -527,6 +557,7 @@ phase2_disk() {
   } > "$D/no_quarantine.txt"
 
   log INFO "Recent hidden directories under \$HOME..."
+  # -name '.[!.]*' matches dotfiles but excludes '.' and '..'.
   /usr/bin/find "$(rp "$TARGET_HOME")" -maxdepth $HIDDEN_DIR_MAXDEPTH -type d -name '.[!.]*' \
     -mtime -${CHANGE_WINDOW_DAYS} ! -path '*/Library/*' 2>/dev/null > "$D/recent_hidden_dirs.txt"
 
@@ -562,11 +593,12 @@ phase3_persistence() {
     local d p prog sprog
     for d in "$TARGET_HOME/Library/LaunchAgents" /Library/LaunchAgents /Library/LaunchDaemons; do
       [[ -d "$(rp "$d")" ]] || continue
-      for p in "$(rp "$d")"/*.plist(N); do
+      for p in "$(rp "$d")"/*.plist(N); do       # (N) NULL_GLOB qualifier: no match -> empty
         echo "=== PLIST: ${p#$SRC} ==="; stat_meta "$p"
         echo "--- contents ---"
         /usr/libexec/PlistBuddy -c "Print" "$p" 2>/dev/null || /bin/cat "$p"
         prog=$(/usr/libexec/PlistBuddy -c "Print :Program" "$p" 2>/dev/null)
+        # Fall back to the first ProgramArguments entry if :Program is absent.
         [[ -z "$prog" ]] && prog=$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:0" "$p" 2>/dev/null)
         if [[ -n "$prog" ]]; then
           sprog="$(rp "$prog")"
@@ -718,6 +750,7 @@ phase4_logs() {
   fi
 
   log INFO "Extracting FSEvents strings..."
+  # Prefer the real 'strings' binary; otherwise approximate with tr (keep printable + newlines).
   local strings_cmd
   if (( $+commands[strings] )); then strings_cmd=(/usr/bin/strings); else strings_cmd=(tr -cd '[:print:]\n'); fi
   /usr/bin/find /.fseventsd -type f -mtime -${CHANGE_WINDOW_DAYS} 2>/dev/null | head -${FSEVENTS_FILE_LIMIT} | \
@@ -824,7 +857,7 @@ phase5_secrets() {
     for browser in Chrome 'BraveSoftware/Brave-Browser' 'Microsoft Edge' Vivaldi; do
       base="$(rp "$TARGET_HOME/Library/Application Support/$browser/Default/Local Extension Settings")"
       [[ -d "$base" ]] || continue
-      for id name in ${(kv)EXT_WALLETS}; do
+      for id name in ${(kv)EXT_WALLETS}; do      # ${(kv)...}: iterate key then value per pair
         p="$base/$id"; [[ -d "$p" ]] || continue
         echo "=== EXT WALLET: $name ($id) in $browser ==="; /bin/ls -la "$p"
         /usr/bin/find "$p" -type f 2>/dev/null | while read -r f; do stat_meta "$f"; echo; done
@@ -896,6 +929,7 @@ phase6_samples() {
       case "$out" in
         Mach-O*)
           sig=$(/usr/bin/codesign -dv "$f" 2>&1)
+          # Flag only ad-hoc / revoked / unsigned / invalid signatures.
           if echo "$sig" | /usr/bin/grep -qE 'adhoc|revoked|not signed|invalid'; then
             echo "SUSPECT: ${f#$SRC}"; echo "  type: $out"; echo "$sig" | /usr/bin/sed 's/^/  sig: /'; echo
           fi ;;
@@ -946,11 +980,13 @@ phase8_finalize() {
     local ioc
     for ioc in "${IOC_STRINGS[@]}"; do
       echo "=== IOC: $ioc ==="
+      # -F fixed-string, -I skip binaries, -n line numbers; never grep our own report.
       /usr/bin/grep -rInF --binary-files=without-match \
         --exclude-dir=_meta --exclude='ioc_hits.txt' -- "$ioc" "$OUT" 2>/dev/null | head -${IOC_HIT_LIMIT}
       echo
     done
   } > "$D/ioc_hits.txt"
+  # Count only actual "file:line:" hit rows (skip headers/blank lines).
   local hit_count
   hit_count=$(/usr/bin/grep -cE '^[^#=[:space:]].*:[0-9]+:' "$D/ioc_hits.txt" 2>/dev/null); hit_count=${hit_count:-0}
   (( hit_count > 0 )) && log WARN "IOC hits: $hit_count lines — see 08_final/ioc_hits.txt" \
@@ -981,6 +1017,7 @@ Generated: $(ts)
 EOF
 
   log INFO "Building SHA-256 manifest..."
+  # Subshell cd keeps manifest paths relative; exclude the manifest itself.
   ( cd "$OUT" && /usr/bin/find . -type f ! -path "./_meta/MANIFEST.sha256" -exec /usr/bin/shasum -a 256 {} + ) > "$MANIFEST"
   local file_count total_size
   file_count=$(/usr/bin/wc -l < "$MANIFEST"); file_count=${file_count// /}
@@ -1015,13 +1052,14 @@ EOF
 }
 
 # ============================================================================
-# Main
+# MAIN
 # ============================================================================
 main() {
   # Dry-run: show resolved plan and exit before any side effect.
   if (( $#o_dryrun )); then print_plan; exit 0; fi
 
   printf "\n%s macOS IR Evidence Collector v%s — Odyssey/AMOS %s\n\n" "$CW" "$SCRIPT_VERSION" "$CN"
+  # Ensure the read-only snapshot is always unmounted on normal exit or signal.
   trap 'unmount_snapshot' EXIT INT TERM
 
   preflight
