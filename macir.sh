@@ -1,16 +1,16 @@
 #!/bin/zsh
 # ============================================================================
-# ir_collect.sh — macOS Incident Response Evidence Collector
+# macir.sh — macOS Incident Response Evidence Collector
 # ----------------------------------------------------------------------------
 # Target:     Network-isolated macOS host (Ventura+ / Sonoma / Sequoia)
 # Threat:     Odyssey / Poseidon / AMOS macOS infostealer (ClickFix delivery)
 # Author:     Khodaparastan
 # Version:    3.0  (2026-06-12)  — configurable + CLI
-# Invocation: sudo -E ./ir_collect.sh [options]   (run --help for details)
+# Invocation: sudo -E ./macir.sh [options]   (run --help for details)
 # Requires:   macOS base tools (tmutil, mount_apfs, log, sqlite3, codesign,
 #             spctl, otool, sfltool, profiles, powermetrics); zsh 5.8+.
 #
-# Config precedence:  built-in defaults < ir_collect.conf < environment < CLI
+# Config precedence:  built-in defaults < macir.conf < environment < CLI
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -41,7 +41,7 @@ PATHS / IDENTITY
   -o, --evidence-base DIR   Output root (must be external media)   [/Volumes/IR]
   -i, --case-id ID          Case identifier            [IR-<ts>-<host>]
   -u, --target-user USER    User to triage                  [\$SUDO_USER]
-  -c, --config FILE         Config file to source   [<evidence-base>/ir_collect.conf]
+  -c, --config FILE         Config file to source   [<evidence-base>/macir.conf]
   -I, --ioc-file FILE       Extra IOCs, one per line (# comments ok)
 
 WINDOWS / SIZING
@@ -73,7 +73,7 @@ EXAMPLES
        -I /Volumes/IR/case/iocs.txt -o /Volumes/IR
   sudo -E ${SCRIPT_NAME} --dry-run                         # preview plan
 
-Precedence: defaults < ir_collect.conf < environment < CLI flags.
+Precedence: defaults < macir.conf < environment < CLI flags.
 Tool paths (/usr/bin/...) are intentionally fixed to resist PATH hijack.
 EOF
 }
@@ -122,7 +122,7 @@ zparseopts -D -E -F -- \
 # 1) Locate conf (CLI -c > env IR_CONFIG > default under evidence base).
 #    o_base[-1] = last occurrence of the option, if supplied.
 _pre_base="${o_base[-1]:-${EVIDENCE_BASE:-/Volumes/IR}}"
-: ${IR_CONFIG:="${_pre_base}/ir_collect.conf"}
+: ${IR_CONFIG:="${_pre_base}/macir.conf"}
 (( $#o_config )) && IR_CONFIG="${o_config[-1]}"
 _IR_CONFIG_LOADED=""
 [[ -r "$IR_CONFIG" ]] && { source "$IR_CONFIG"; _IR_CONFIG_LOADED=1 }
@@ -452,7 +452,7 @@ phase1_volatile() {
   # excluding this collector itself.
   local suspect_pids
   suspect_pids=$(ps -Axwwo pid,command | awk '
-    /\/tmp\/|\/private\/tmp\/|\/Users\/Shared\/|\/\.[a-z0-9]/ && $0 !~ /ir_collect/ {print $1}' | sort -u)
+    /\/tmp\/|\/private\/tmp\/|\/Users\/Shared\/|\/\.[a-z0-9]/ && $0 !~ /macir/ {print $1}' | sort -u)
   if [[ -n "$suspect_pids" ]]; then
     {
       echo "=== Suspect PIDs ==="; echo "$suspect_pids"; echo
